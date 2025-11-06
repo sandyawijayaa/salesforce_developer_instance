@@ -1,0 +1,142 @@
+/**
+ * This Queueable Apex class reads a CSV file of nursing homes from a Static Resource,
+ * parses it, and upserts Account records.
+ *
+ * It's designed to be run from Anonymous Apex in the Developer Console.
+ *
+ * The 'upsert' command uses the 'CMS_Certification_Number__c' external ID field
+ * to prevent duplicate records, fulfilling the requirement.
+ *
+ * **FINAL VERSION:**
+ * - Corrected column indexes for your CSV.
+ * - Uses standard fields for Name/Address (Best Practice).
+ * - Uses your custom CMS_Certification_Number__c, Status__c, and State__c fields.
+ * - Uses the
+ * (which you just created in Step 1).
+ */
+public class NursingHomeAccountImporter implements Queueable {
+
+    // --- UPDATED COLUMN INDEXES ---
+    // These now match your 'filtered- NH_ProviderInfo_Sep2025.csv' file
+    private static final Integer COL_CNN = 0;           // 'CMS Certification Number (CCN)'
+    private static final Integer COL_NAME = 1;          // 'Provider Name'
+    private static final Integer COL_ADDRESS = 2;       // 'Provider Address'
+    private static final Integer COL_CITY = 3;          // 'City/Town'
+    private static final Integer COL_STATE = 4;         // 'State'
+    private static final Integer COL_ZIP = 5;           // 'ZIP Code'
+    private static final Integer COL_PHONE = 6;         // 'Telephone Number'
+    private static final Integer COL_OWNERSHIP = 9;     // 'Ownership Type'
+    private static final Integer COL_BEDS = 10;         // 'Number of Certified Beds'
+    
+    // This is the correct column for Step 4 of the assignment
+    private static final Integer COL_STAFFING = 54;     // 'Reported Total Nurse Staffing Hours per Resident per Day'
+    // --- END UPDATED INDEXES ---
+
+
+    public void execute(QueueableContext context) {
+        // 1. Find the Static Resource containing our data
+        StaticResource csvResource;
+        try {
+            csvResource = [SELECT Body FROM StaticResource WHERE Name = 'nursing_homes_data' LIMIT 1];
+        } catch (Exception e) {
+            System.debug('ERROR: Could not find Static Resource named "nursing_homes_data".');
+            System.debug(e.getMessage());
+            return;
+        }
+
+        // 2. Read the file and split into lines
+        String csvBody = csvResource.Body.toString();
+        String[] csvLines = csvBody.split('\n');
+
+        Map<String, Account> accountsToUpsert = new Map<String, Account>();
+
+        // 3. Loop through each line (row) in the file
+        // Start at i=1 to skip the header row
+        for (Integer i = 1; i < csvLines.size(); i++) {
+            String line = csvLines[i];
+
+            // Salesforce CSVs often end in \r (carriage return), trim it
+            if (line.endsWith('\r')) {
+                line = line.substring(0, line.length() - 1);
+            }
+
+            String[] csvRow = line.split(',');
+
+            try {
+                // We must have at least enough columns to get our data
+                if (csvRow.size() > COL_STAFFING) {
+                    String cnn = csvRow[COL_CNN];
+
+                    // Don't process if the key (CNN) is blank or already in our map
+                    if (String.isNotBlank(cnn) && !accountsToUpsert.containsKey(cnn)) {
+                        Account acc = new Account();
+
+                        // Use the External ID field (your custom field)
+                        acc.CMS_Certification_Number__c = cnn;
+
+                        // Map to standard fields (better than custom fields)
+                        acc.Name = csvRow[COL_NAME];
+                        acc.Phone = csvRow[COL_PHONE];
+                        acc.Type = csvRow[COL_OWNERSHIP];
+
+                        // Map Billing Address (standard address compound field)
+                        acc.BillingStreet = csvRow[COL_ADDRESS];
+                        acc.BillingCity = csvRow[COL_CITY];
+                        acc.BillingState = csvRow[COL_STATE];
+                        acc.BillingPostalCode = csvRow[COL_ZIP];
+
+                        // Map to your custom State__c field as well
+                        acc.State__c = csvRow[COL_STATE];
+
+                        // Map to the field required for Step 4
+                        acc.Total_Nurse_Staffing_Hours__c = parseDecimal(csvRow[COL_STAFFING]);
+                        
+                        // Map to your custom Status__c field
+                        acc.Status__c = 'Active';
+
+                        accountsToUpsert.put(cnn, acc);
+                    }
+                }
+            } catch (Exception e) {
+                System.debug('Failed to parse row ' + i + ': ' + csvLines[i]);
+                System.debug('Error: ' + e.getMessage());
+                // Continue processing other rows
+            }
+        }
+
+        // 4. Perform the DML operation
+        if (!accountsToUpsert.isEmpty()) {
+            System.debug('Upserting ' + accountsToUpsert.size() + ' Account records.');
+            
+            Database.UpsertResult[] upsertResults = Database.upsert(accountsToUpsert.values(), Account.CMS_Certification_Number__c.getDescribe().getSObjectField(), false);
+        
+            for (Database.UpsertResult ur : upsertResults) {
+                if (ur.isSuccess()) {
+                    System.debug('Successfully upserted Account. ID: ' + ur.getId());
+                }
+                else {
+                    // It failed
+                    System.debug('UpsDML Failed: ' + ur.getErrors()[0].getMessage() + ' for row data: ' + accountsToUpsert.get(ur.getId()));
+                }
+            }
+        } else {
+            System.debug('No valid Account records found to upsert.');
+        }
+    }
+
+    /**
+     * Helper function to safely parse a String into a Decimal.
+     * Returns null if parsing fails.
+     */
+    private Decimal parseDecimal(String s) {
+        if (String.isBlank(s)) {
+            return null;
+        }
+        try {
+            return Decimal.valueOf(s);
+        } catch (Exception e) {
+            System.debug('Could not parse decimal: ' + s);
+            return null;
+        }
+    }
+}
